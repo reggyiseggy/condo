@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>The Tapestry — Payment Tracker</title>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f5f5f3; color: #1a1a1a; min-height: 100vh; }
+  input, select { font-family: inherit; font-size: 14px; padding: 8px 10px; border: 1px solid #ddd; border-radius: 8px; width: 100%; background: #fff; color: #1a1a1a; outline: none; }
+  input:focus, select:focus { border-color: #888; }
+  button { font-family: inherit; cursor: pointer; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+  .card { animation: fadeIn 0.2s ease; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useRef } = React;
+
+// ── Firebase config ───────────────────────────────────────────────
+// 1. Go to https://console.firebase.google.com
+// 2. Create a project → Add a web app → copy the firebaseConfig object
+// 3. Enable Firestore (Build → Firestore Database → Start in test mode)
+// 4. Paste your config values below
+const firebaseConfig = {
+  apiKey:            "PASTE_API_KEY_HERE",
+  authDomain:        "PASTE_AUTH_DOMAIN_HERE",
+  projectId:         "PASTE_PROJECT_ID_HERE",
+  storageBucket:     "PASTE_STORAGE_BUCKET_HERE",
+  messagingSenderId: "PASTE_MESSAGING_SENDER_ID_HERE",
+  appId:             "PASTE_APP_ID_HERE",
+};
+// ─────────────────────────────────────────────────────────────────
+
+firebase.initializeApp(firebaseConfig);
+const db = firebase.firestore();
+const DOC_REF = db.collection("tapestry").doc("payments");
+
+const PURCHASE_PRICE = 2030000;
+const fmt = n => "S$" + Math.round(n).toLocaleString("en-SG");
+
+const MILESTONES = [
+  {
+    id: "opt1", title: "1% Option Money", dueDate: "30 Mar 2026",
+    dueDateObj: new Date("2026-03-30"), total: 20300,
+    description: "OTP deposit to secure the property",
+    breakdown: [
+      { who: "Kassandra", type: "cash", amount: 10150 },
+      { who: "Regan",     type: "owes", amount: 10150 },
+    ],
+    note: "Paid via Kassandra's PayNow. Regan to reimburse Kassandra S$10,150.",
+  },
+  {
+    id: "opt4", title: "4% OTP Exercise Fee", dueDate: "By ~7 May 2026",
+    dueDateObj: new Date("2026-05-07"), total: 81200,
+    description: "Must be paid in cash — CPF cannot be used at this stage",
+    breakdown: [
+      { who: "Kassandra", type: "cash", amount: 40600 },
+      { who: "Regan",     type: "cash", amount: 40600 },
+    ],
+    note: "5% total less 1% already paid = 4% = S$81,200. Cash only — no CPF. Each pays S$40,600.",
+  },
+  {
+    id: "bsd", title: "Buyer's Stamp Duty (BSD)", dueDate: "Within 14 days of OTP exercise",
+    dueDateObj: new Date("2026-05-21"), total: 59100,
+    description: "Tax on property purchase — paid to IRAS",
+    breakdown: [
+      { who: "Kassandra", type: "cash", amount: 29550 },
+      { who: "Regan",     type: "cash", amount: 29550 },
+    ],
+    note: "Estimated BSD on S$2.03M. Confirm exact amount with your conveyancing lawyer. Split equally.",
+  },
+  {
+    id: "legal", title: "Legal Fees", dueDate: "Upon completion",
+    dueDateObj: new Date("2026-09-01"), total: 3500,
+    description: "Conveyancing lawyer fees",
+    breakdown: [
+      { who: "Kassandra", type: "cash", amount: 1750 },
+      { who: "Regan",     type: "cash", amount: 1750 },
+    ],
+    note: "Estimated. Confirm with your conveyancing lawyer.",
+  },
+  {
+    id: "down20", title: "Remaining 20% Downpayment", dueDate: "Upon completion (~Sep 2026)",
+    dueDateObj: new Date("2026-09-01"), total: 406000,
+    description: "Remaining downpayment after 5% paid — CPF OA can be used here",
+    breakdown: [
+      { who: "Kassandra", type: "cpf",  amount: 80000 },
+      { who: "Kassandra", type: "cash", amount: 123000 },
+      { who: "Regan",     type: "cash", amount: 203000 },
+    ],
+    note: "25% total down = S$507,500 less 5% already paid = S$406,000. Kassandra uses S$80,000 CPF OA. Remaining split equally: Kassandra S$123,000 + Regan S$203,000 cash.",
+  },
+];
+
+const typeColor = { cash: "#185FA5", cpf: "#0F6E56", owes: "#993C1D" };
+const typeLabel = { cash: "Cash", cpf: "CPF OA", owes: "Reimburse" };
+const whoColor  = { Kassandra: "#534AB7", Regan: "#185FA5" };
+const statusStyle = {
+  done:     { bg: "#EAF3DE", color: "#3B6D11", label: "Paid" },
+  partial:  { bg: "#FAEEDA", color: "#854F0B", label: "Partial" },
+  overdue:  { bg: "#FCEBEB", color: "#A32D2D", label: "Overdue" },
+  upcoming: { bg: "#F1EFE8", color: "#5F5E5A", label: "Upcoming" },
+};
+
+const emptyLogs = () => MILESTONES.map(m => ({ milestoneId: m.id, payments: [] }));
+
+function App() {
+  const [logs, setLogs]               = useState(null);
+  const [activeTab, setActiveTab]     = useState("timeline");
+  const [openId, setOpenId]           = useState(null);
+  const [showForm, setShowForm]       = useState(false);
+  const [saving, setSaving]           = useState(false);
+  const [loading, setLoading]         = useState(true);
+  const [dbError, setDbError]         = useState(false);
+  const unsubRef = useRef(null);
+  const [form, setForm] = useState({
+    who: "Kassandra", type: "cash", amount: "", note: "",
+    date: new Date().toISOString().slice(0, 10),
+  });
+
+  useEffect(() => {
+    const isConfigured = firebaseConfig.apiKey !== "PASTE_API_KEY_HERE";
+    if (!isConfigured) { setLogs(emptyLogs()); setLoading(false); setDbError(true); return; }
+    unsubRef.current = DOC_REF.onSnapshot(snap => {
+      if (snap.exists) {
+        setLogs(snap.data().logs);
+      } else {
+        const init = emptyLogs();
+        DOC_REF.set({ logs: init });
+        setLogs(init);
+      }
+      setLoading(false);
+    }, () => { setLogs(emptyLogs()); setLoading(false); setDbError(true); });
+    return () => unsubRef.current && unsubRef.current();
+  }, []);
+
+  const getLog    = id => (logs || []).find(l => l.milestoneId === id) || { payments: [] };
+  const paidTotal = id => getLog(id).payments.reduce((s, p) => s + Number(p.amount), 0);
+
+  const milestoneStatus = m => {
+    const paid = paidTotal(m.id);
+    if (paid >= m.total)         return "done";
+    if (paid > 0)                return "partial";
+    if (new Date() > m.dueDateObj) return "overdue";
+    return "upcoming";
+  };
+
+  async function persist(newLogs) {
+    setSaving(true);
+    setLogs(newLogs);
+    if (!dbError) {
+      try { await DOC_REF.set({ logs: newLogs }); } catch(e) { console.error(e); }
+    }
+    setSaving(false);
+  }
+
+  async function addPayment() {
+    if (!form.amount || isNaN(form.amount)) return;
+    const newLogs = (logs || []).map(l =>
+      l.milestoneId === openId
+        ? { ...l, payments: [...l.payments, { ...form, amount: Number(form.amount), id: Date.now() }] }
+        : l
+    );
+    await persist(newLogs);
+    setForm({ who: "Kassandra", type: "cash", amount: "", note: "", date: new Date().toISOString().slice(0, 10) });
+    setShowForm(false);
+  }
+
+  async function deletePayment(milestoneId, pid) {
+    const newLogs = (logs || []).map(l =>
+      l.milestoneId === milestoneId
+        ? { ...l, payments: l.payments.filter(p => p.id !== pid) }
+        : l
+    );
+    await persist(newLogs);
+  }
+
+  if (loading) return (
+    <div style={{ display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", minHeight:"100vh", gap:14, color:"#888" }}>
+      <div style={{ width:28, height:28, border:"2px solid #ddd", borderTopColor:"#333", borderRadius:"50%", animation:"spin 0.8s linear infinite" }}/>
+      <span style={{ fontSize:13 }}>Loading tracker…</span>
+    </div>
+  );
+
+  const totalAll      = MILESTONES.reduce((s, m) => s + m.total, 0);
+  const totalPaid     = MILESTONES.reduce((s, m) => s + paidTotal(m.id), 0);
+  const kassOwed      = MILESTONES.reduce((s, m) => s + m.breakdown.filter(b => b.who === "Kassandra").reduce((a, b) => a + b.amount, 0), 0);
+  const reganOwed     = MILESTONES.reduce((s, m) => s + m.breakdown.filter(b => b.who === "Regan").reduce((a, b) => a + b.amount, 0), 0);
+  const kassandraPaid = (logs||[]).reduce((s,l) => s + l.payments.filter(p=>p.who==="Kassandra").reduce((a,p)=>a+p.amount,0),0);
+  const reganPaid     = (logs||[]).reduce((s,l) => s + l.payments.filter(p=>p.who==="Regan").reduce((a,p)=>a+p.amount,0),0);
+  const allPayments   = (logs||[]).flatMap(l => l.payments.map(p => ({ ...p, milestoneTitle: MILESTONES.find(m=>m.id===l.milestoneId)?.title }))).sort((a,b)=>new Date(b.date)-new Date(a.date));
+  const pct           = Math.min(100, Math.round((totalPaid / totalAll) * 100));
+
+  const summaryCards = [
+    { label:"Total paid",      value:fmt(totalPaid),     sub:`of ${fmt(totalAll)}` },
+    { label:"Outstanding",     value:fmt(totalAll-totalPaid), sub:"remaining" },
+    { label:"Kassandra paid",  value:fmt(kassandraPaid), sub:`of ${fmt(kassOwed)}` },
+    { label:"Regan paid",      value:fmt(reganPaid),     sub:`of ${fmt(reganOwed)}` },
+  ];
+
+  return (
+    <div style={{ maxWidth:520, margin:"0 auto", padding:"20px 14px 80px" }}>
+
+      {/* Header */}
+      <div style={{ marginBottom:20 }}>
+        <div style={{ fontSize:11, color:"#888", letterSpacing:1, textTransform:"uppercase", marginBottom:2 }}>The Tapestry #07-15</div>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+          <div style={{ fontSize:22, fontWeight:500 }}>Payment tracker</div>
+          <div style={{ fontSize:11, color: saving ? "#BA7517" : dbError ? "#A32D2D" : "#3B6D11", fontWeight:500 }}>
+            {saving ? "Saving…" : dbError ? "Local only" : "Synced"}
+          </div>
+        </div>
+        <div style={{ fontSize:13, color:"#666", marginTop:2 }}>53 Tampines Street 86 · S$2,030,000 · Kassandra & Regan</div>
+        {dbError && <div style={{ fontSize:11, color:"#A32D2D", marginTop:6, padding:"6px 10px", background:"#FCEBEB", borderRadius:8 }}>Firebase not configured — data saves locally only. See setup instructions.</div>}
+      </div>
+
+      {/* Summary cards */}
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10, marginBottom:16 }}>
+        {summaryCards.map(c => (
+          <div key={c.label} style={{ background:"#fff", border:"1px solid #eee", borderRadius:12, padding:"12px 14px" }}>
+            <div style={{ fontSize:11, color:"#888", marginBottom:4 }}>{c.label}</div>
+            <div style={{ fontSize:18, fontWeight:500 }}>{c.value}</div>
+            <div style={{ fontSize:11, color:"#aaa", marginTop:2 }}>{c.sub}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Progress bar */}
+      <div style={{ marginBottom:20 }}>
+        <div style={{ display:"flex", justifyContent:"space-between", fontSize:11, color:"#888", marginBottom:6 }}>
+          <span>Overall progress</span><span>{pct}%</span>
+        </div>
+        <div style={{ height:6, background:"#eee", borderRadius:3 }}>
+          <div style={{ height:"100%", width:pct+"%", background:"#639922", borderRadius:3, transition:"width 0.4s" }}/>
+        </div>
+      </div>
+
+      {/* Tabs */}
+      <div style={{ display:"flex", gap:6, marginBottom:20 }}>
+        {["timeline","log"].map(t => (
+          <button key={t} onClick={()=>setActiveTab(t)} style={{
+            padding:"7px 18px", borderRadius:20, border:"1px solid #ddd",
+            background: activeTab===t ? "#1a1a1a" : "transparent",
+            color: activeTab===t ? "#fff" : "#666",
+            fontSize:13, fontWeight: activeTab===t ? 500 : 400,
+          }}>{t==="timeline" ? "Milestones" : "Payment log"}</button>
+        ))}
+      </div>
+
+      {/* MILESTONES */}
+      {activeTab==="timeline" && MILESTONES.map((m,i) => {
+        const st  = milestoneStatus(m);
+        const ss  = statusStyle[st];
+        const paid = paidTotal(m.id);
+        const mpct = Math.min(100, Math.round((paid/m.total)*100));
+        const log  = getLog(m.id);
+        const isOpen = openId === m.id;
+
+        return (
+          <div key={m.id} style={{ marginBottom:10 }} className="card">
+            <div style={{ display:"flex", alignItems:"flex-start", gap:10 }}>
+              <div style={{ display:"flex", flexDirection:"column", alignItems:"center", paddingTop:4 }}>
+                <div style={{ width:26, height:26, borderRadius:"50%", background:ss.bg, display:"flex", alignItems:"center", justifyContent:"center", fontSize:11, fontWeight:600, color:ss.color, flexShrink:0 }}>
+                  {st==="done" ? "✓" : i+1}
+                </div>
+                {i < MILESTONES.length-1 && <div style={{ width:1, flex:1, minHeight:16, background:"#e5e5e5", marginTop:2 }}/>}
+              </div>
+              <div style={{ flex:1, background:"#fff", border:"1px solid #eee", borderRadius:12, overflow:"hidden", marginBottom:4 }}>
+                {/* Card header */}
+                <div onClick={()=>{ setOpenId(isOpen?null:m.id); setShowForm(false); }} style={{ padding:"12px 14px", cursor:"pointer", display:"flex", justifyContent:"space-between", alignItems:"flex-start" }}>
+                  <div style={{ flex:1, marginRight:10 }}>
+                    <div style={{ fontWeight:500, fontSize:14 }}>{m.title}</div>
+                    <div style={{ fontSize:12, color:"#888", marginTop:2 }}>{m.dueDate}</div>
+                  </div>
+                  <div style={{ textAlign:"right", flexShrink:0 }}>
+                    <div style={{ fontWeight:500, fontSize:14 }}>{fmt(m.total)}</div>
+                    <div style={{ display:"inline-block", background:ss.bg, color:ss.color, fontSize:11, fontWeight:600, padding:"2px 8px", borderRadius:20, marginTop:4 }}>{ss.label}</div>
+                  </div>
+                </div>
+                {/* Progress */}
+                <div style={{ height:3, background:"#f0f0f0", margin:"0 14px" }}>
+                  <div style={{ height:"100%", width:mpct+"%", background: st==="done"?"#639922":st==="partial"?"#BA7517":"#ccc", borderRadius:2, transition:"width 0.3s" }}/>
+                </div>
+                <div style={{ fontSize:11, color:"#888", padding:"4px 14px 8px", textAlign:"right" }}>{fmt(paid)} paid · {mpct}%</div>
+
+                {/* Expanded */}
+                {isOpen && (
+                  <div style={{ borderTop:"1px solid #f0f0f0", padding:"12px 14px" }}>
+                    <div style={{ fontSize:12, color:"#666", marginBottom:12 }}>{m.description}</div>
+
+                    <div style={{ fontSize:12, fontWeight:500, color:"#888", marginBottom:8 }}>Who pays what</div>
+                    {m.breakdown.map((b,bi) => (
+                      <div key={bi} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:6, padding:"8px 10px", background:"#f9f9f7", borderRadius:8 }}>
+                        <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                          <div style={{ width:28, height:28, borderRadius:"50%", background:whoColor[b.who]+"22", display:"flex", alignItems:"center", justifyContent:"center", fontSize:11, fontWeight:600, color:whoColor[b.who] }}>{b.who[0]}</div>
+                          <div>
+                            <div style={{ fontWeight:500, fontSize:13 }}>{b.who}</div>
+                            <div style={{ fontSize:11, padding:"1px 7px", borderRadius:10, display:"inline-block", background:typeColor[b.type]+"22", color:typeColor[b.type] }}>{typeLabel[b.type]}</div>
+                          </div>
+                        </div>
+                        <div style={{ fontWeight:500 }}>{fmt(b.amount)}</div>
+                      </div>
+                    ))}
+
+                    <div style={{ fontSize:11, color:"#777", padding:"8px 10px", background:"#f9f9f7", borderRadius:8, marginTop:8, lineHeight:1.6 }}>{m.note}</div>
+
+                    {log.payments.length > 0 && (
+                      <div style={{ marginTop:14 }}>
+                        <div style={{ fontSize:12, fontWeight:500, color:"#888", marginBottom:8 }}>Payments logged</div>
+                        {log.payments.map(p => (
+                          <div key={p.id} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"8px 10px", marginBottom:4, background:"#f9f9f7", borderRadius:8 }}>
+                            <div>
+                              <div style={{ fontSize:13 }}><span style={{ fontWeight:500, color:whoColor[p.who] }}>{p.who}</span> · <span style={{ color:typeColor[p.type] }}>{typeLabel[p.type]}</span></div>
+                              <div style={{ fontSize:11, color:"#888" }}>{p.date}{p.note?" · "+p.note:""}</div>
+                            </div>
+                            <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+                              <span style={{ fontWeight:500 }}>{fmt(p.amount)}</span>
+                              <button onClick={()=>deletePayment(m.id,p.id)} style={{ background:"none", border:"none", color:"#bbb", fontSize:18, padding:"0 2px", lineHeight:1 }}>×</button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {showForm && openId===m.id ? (
+                      <div style={{ marginTop:14, padding:12, background:"#f9f9f7", borderRadius:10 }}>
+                        <div style={{ fontSize:13, fontWeight:500, marginBottom:12 }}>Log a payment</div>
+                        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, marginBottom:8 }}>
+                          <div>
+                            <div style={{ fontSize:11, color:"#888", marginBottom:4 }}>Paid by</div>
+                            <select value={form.who} onChange={e=>setForm({...form,who:e.target.value})}>
+                              <option>Kassandra</option><option>Regan</option>
+                            </select>
+                          </div>
+                          <div>
+                            <div style={{ fontSize:11, color:"#888", marginBottom:4 }}>Type</div>
+                            <select value={form.type} onChange={e=>setForm({...form,type:e.target.value})}>
+                              <option value="cash">Cash</option>
+                              <option value="cpf">CPF OA</option>
+                              <option value="owes">Reimbursement</option>
+                            </select>
+                          </div>
+                        </div>
+                        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, marginBottom:8 }}>
+                          <div>
+                            <div style={{ fontSize:11, color:"#888", marginBottom:4 }}>Amount (S$)</div>
+                            <input type="number" placeholder="0" value={form.amount} onChange={e=>setForm({...form,amount:e.target.value})}/>
+                          </div>
+                          <div>
+                            <div style={{ fontSize:11, color:"#888", marginBottom:4 }}>Date</div>
+                            <input type="date" value={form.date} onChange={e=>setForm({...form,date:e.target.value})}/>
+                          </div>
+                        </div>
+                        <div style={{ marginBottom:12 }}>
+                          <div style={{ fontSize:11, color:"#888", marginBottom:4 }}>Note (optional)</div>
+                          <input placeholder="e.g. PayNow ref #1234" value={form.note} onChange={e=>setForm({...form,note:e.target.value})}/>
+                        </div>
+                        <div style={{ display:"flex", gap:8 }}>
+                          <button onClick={addPayment} style={{ flex:1, padding:10, borderRadius:8, background:"#1a1a1a", color:"#fff", border:"none", fontSize:13, fontWeight:500 }}>Save payment</button>
+                          <button onClick={()=>setShowForm(false)} style={{ padding:"10px 14px", borderRadius:8, border:"1px solid #ddd", background:"#fff", fontSize:13 }}>Cancel</button>
+                        </div>
+                      </div>
+                    ) : (
+                      <button onClick={()=>setShowForm(true)} style={{ marginTop:12, width:"100%", padding:10, borderRadius:8, border:"1px solid #e5e5e5", background:"transparent", fontSize:13, color:"#888" }}>
+                        + Log a payment
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      })}
+
+      {/* PAYMENT LOG */}
+      {activeTab==="log" && (
+        <div>
+          {allPayments.length===0 ? (
+            <div style={{ textAlign:"center", padding:"50px 20px", color:"#aaa", fontSize:13 }}>No payments logged yet.<br/>Tap a milestone to log one.</div>
+          ) : allPayments.map(p => (
+            <div key={p.id} style={{ padding:"12px 0", borderBottom:"1px solid #f0f0f0", display:"flex", justifyContent:"space-between", alignItems:"flex-start" }}>
+              <div>
+                <div style={{ fontSize:13, fontWeight:500 }}>{p.milestoneTitle}</div>
+                <div style={{ fontSize:12, color:"#888", marginTop:2 }}>
+                  <span style={{ color:whoColor[p.who], fontWeight:500 }}>{p.who}</span> · {typeLabel[p.type]} · {p.date}
+                </div>
+                {p.note && <div style={{ fontSize:11, color:"#aaa", marginTop:2 }}>{p.note}</div>}
+              </div>
+              <div style={{ fontWeight:500, fontSize:14 }}>{fmt(p.amount)}</div>
+            </div>
+          ))}
+
+          {allPayments.length > 0 && (
+            <div style={{ marginTop:20, padding:14, background:"#f9f9f7", borderRadius:12 }}>
+              {[{who:"Kassandra",paid:kassandraPaid,owed:kassOwed},{who:"Regan",paid:reganPaid,owed:reganOwed}].map(r => (
+                <div key={r.who} style={{ marginBottom:12 }}>
+                  <div style={{ display:"flex", justifyContent:"space-between", fontSize:13, marginBottom:5 }}>
+                    <span style={{ fontWeight:500, color:whoColor[r.who] }}>{r.who}</span>
+                    <span>{fmt(r.paid)} <span style={{ color:"#aaa" }}>of {fmt(r.owed)}</span></span>
+                  </div>
+                  <div style={{ height:4, background:"#eee", borderRadius:2 }}>
+                    <div style={{ height:"100%", width:Math.min(100,Math.round((r.paid/r.owed)*100))+"%", background:whoColor[r.who], borderRadius:2, transition:"width 0.3s" }}/>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      <div style={{ marginTop:28, fontSize:11, color:"#aaa", lineHeight:1.7, borderTop:"1px solid #eee", paddingTop:12 }}>
+        CPF OA can only be used at completion, not at OTP exercise. BSD figures are estimates — confirm with your lawyer. All amounts in SGD.
+      </div>
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<App/>);
+</script>
+</body>
+</html>
